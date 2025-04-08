@@ -23,9 +23,57 @@ NEW_SSH_PORT=""
 CONFIGURE_UFW=""  # yes/no
 CONFIGURE_FAIL2BAN=""  # yes/no
 CONFIGURE_SSH_KEYS=""  # yes/no
+CLEANUP_PACKAGES=""    # yes/no
 
 # Зарезервированные имена
 RESERVED_USERNAMES=(root bin daemon adm lp sync shutdown halt mail news uucp operator games ftp nobody systemd-timesync systemd-network systemd-resolve systemd-bus-proxy sys log uuidd admin)
+
+# Список служб, которые можно безопасно отключить на большинстве VPS
+SAFE_DISABLE_SERVICES=(
+    "avahi-daemon"
+    "bluetooth"
+    "cups"
+    "cups-browsed"
+    "ModemManager"
+    "wpa_supplicant"
+    "snapd"
+    "whoopsie"
+    "polkit"
+    "rsync"
+    "nfs-server"
+    "rpcbind"
+    "apport"
+    "docker"
+    "lxcfs"
+    "lvm2-lvmetad"
+    "lvm2-monitor"
+    "mdadm"
+)
+
+# Список пакетов, которые можно безопасно удалить на большинстве VPS
+SAFE_REMOVE_PACKAGES=(
+    "avahi-daemon"
+    "apport"
+    "snapd"
+    "popularity-contest"
+    "pppoeconf"
+    "ppp"
+    "modemmanager"
+    "wireless-tools"
+    "wpasupplicant"
+    "bluez"
+    "printer-driver-*"
+    "cups"
+    "cups-browsed"
+    "whoopsie"
+    "xserver-xorg*"
+    "x11-*"
+    "fonts-*"
+    "gnome-*"
+    "ubuntu-desktop"
+    "plymouth"
+    "landscape-client"
+)
 
 # Функция для выполнения команды на удаленной машине через SSH
 function ssh_command() {
@@ -499,6 +547,75 @@ function manage_services() {
     done
 }
 
+# Функция для удаления неиспользуемых демонов и пакетов
+function cleanup_system() {
+    echo "Очистка системы от неиспользуемых демонов и пакетов..."
+    
+    # Создаем массивы для хранения выбранных сервисов и пакетов
+    local services_to_disable=()
+    local packages_to_remove=()
+    
+    echo "Поиск запущенных сервисов..."
+    # Получаем список всех активных сервисов
+    active_services=$(run_command "systemctl list-units --type=service --state=active | grep '\.service' | awk '{print \$1}'")
+    
+    echo "Список сервисов, которые можно отключить:"
+    for service in "${SAFE_DISABLE_SERVICES[@]}"; do
+        if echo "$active_services" | grep -q "$service"; then
+            echo "$service (активен)"
+            if $(prompt_yes_no "Отключить $service?"); then
+                services_to_disable+=("$service")
+            fi
+        elif run_command "systemctl list-unit-files | grep -q '$service'"; then
+            echo "$service (установлен, но не активен)"
+            if $(prompt_yes_no "Отключить и удалить $service?"); then
+                services_to_disable+=("$service")
+            fi
+        fi
+    done
+    
+    # Отключаем выбранные сервисы
+    if [ ${#services_to_disable[@]} -gt 0 ]; then
+        echo "Отключение выбранных сервисов..."
+        for service in "${services_to_disable[@]}"; do
+            echo "Отключение $service..."
+            run_command "sudo systemctl stop $service"
+            run_command "sudo systemctl disable $service"
+            run_command "sudo systemctl mask $service"
+            echo "Сервис $service остановлен, отключен и замаскирован."
+        done
+    else
+        echo "Не выбрано ни одного сервиса для отключения."
+    fi
+    
+    echo "Поиск установленных пакетов для удаления..."
+    # Проверяем каждый пакет из списка
+    for package in "${SAFE_REMOVE_PACKAGES[@]}"; do
+        if run_command "dpkg -l | grep -q '$package'"; then
+            echo "Найден пакет: $package"
+            if $(prompt_yes_no "Удалить пакет $package?"); then
+                packages_to_remove+=("$package")
+            fi
+        fi
+    done
+    
+    # Удаляем выбранные пакеты
+    if [ ${#packages_to_remove[@]} -gt 0 ]; then
+        echo "Удаление выбранных пакетов..."
+        local packages_string=$(printf "%s " "${packages_to_remove[@]}")
+        run_command "sudo apt purge -y $packages_string"
+        echo "Выбранные пакеты удалены."
+    else
+        echo "Не выбрано ни одного пакета для удаления."
+    fi
+    
+    # Удаляем ненужные зависимости и очищаем кэш apt
+    run_command "sudo apt autoremove -y"
+    run_command "sudo apt clean"
+    
+    echo "Очистка системы завершена."
+}
+
 # Интерактивное меню для настройки безопасности
 function interactive_menu() {
     while true; do
@@ -511,8 +628,9 @@ function interactive_menu() {
         echo "5. Настройка файрвола (ufw)"
         echo "6. Настройка защиты от брутфорса (fail2ban)"
         echo "7. Управление сервисами"
-        echo "8. Выход"
-        read -p "Выберите действие (1-8): " choice
+        echo "8. Очистка от неиспользуемых демонов и пакетов"
+        echo "9. Выход"
+        read -p "Выберите действие (1-9): " choice
         
         case $choice in
             1)
@@ -537,11 +655,14 @@ function interactive_menu() {
                 manage_services
                 ;;
             8)
+                cleanup_system
+                ;;
+            9)
                 echo "Выход из программы."
                 exit 0
                 ;;
             *)
-                echo "Неверный выбор. Пожалуйста, выберите число от 1 до 8."
+                echo "Неверный выбор. Пожалуйста, выберите число от 1 до 9."
                 ;;
         esac
     done
